@@ -155,9 +155,29 @@ app.put("/api/stages/:id/bet", requireUser, (req, res) => {
 app.post("/api/admin/competitions", requireAdmin, (req, res) => {
   const name = String(req.body.name || "").trim();
   const year = Number(req.body.year);
-  if (!name || !Number.isInteger(year)) return res.status(400).json({ error: "Indica o nome e o ano." });
-  const info = db.prepare("INSERT INTO competitions(name,year) VALUES(?,?)").run(name, year);
+  const firstCloseAt = req.body.firstCloseAt ? new Date(req.body.firstCloseAt) : null;
+  if (!name || !Number.isInteger(year) || !firstCloseAt || Number.isNaN(firstCloseAt.getTime())) return res.status(400).json({ error: "Indica o nome, o ano e a data da primeira etapa." });
+  let info;
+  db.transaction(() => {
+    info = db.prepare("INSERT INTO competitions(name,year) VALUES(?,?)").run(name, year);
+    const insert = db.prepare("INSERT INTO stages(competition_id,number,safety_closes_at,distance_threshold) VALUES(?,?,?,50)");
+    for (let number = 1; number <= 21; number++) {
+      insert.run(info.lastInsertRowid, number, new Date(firstCloseAt.getTime() + (number - 1) * 864e5).toISOString());
+    }
+  })();
   res.json({ id: info.lastInsertRowid });
+});
+
+app.post("/api/admin/competitions/:id/generate-stages", requireAdmin, (req, res) => {
+  const firstCloseAt = req.body.firstCloseAt ? new Date(req.body.firstCloseAt) : null;
+  if (!firstCloseAt || Number.isNaN(firstCloseAt.getTime())) return res.status(400).json({ error: "Indica a data da primeira etapa." });
+  const insert = db.prepare("INSERT OR IGNORE INTO stages(competition_id,number,safety_closes_at,distance_threshold) VALUES(?,?,?,50)");
+  db.transaction(() => {
+    for (let number = 1; number <= 21; number++) {
+      insert.run(req.params.id, number, new Date(firstCloseAt.getTime() + (number - 1) * 864e5).toISOString());
+    }
+  })();
+  res.json({ ok: true, count: db.prepare("SELECT COUNT(*) count FROM stages WHERE competition_id=?").get(req.params.id).count });
 });
 
 app.patch("/api/admin/competitions/:id", requireAdmin, (req, res) => {
@@ -207,6 +227,17 @@ app.post("/api/admin/competitions/:id/stages", requireAdmin, (req, res) => {
   const info = db.prepare(`INSERT INTO stages(competition_id,number,title,safety_closes_at,distance_threshold,live_url)
     VALUES(?,?,?,?,?,?)`).run(req.params.id, number, String(req.body.title || ""), req.body.safetyClosesAt || null, Number(req.body.distanceThreshold || 50), req.body.liveUrl || null);
   res.json({ id: info.lastInsertRowid });
+});
+
+app.patch("/api/admin/stages/:id", requireAdmin, (req, res) => {
+  const stage = db.prepare("SELECT * FROM stages WHERE id=?").get(req.params.id);
+  if (!stage) return res.status(404).json({ error: "Etapa não encontrada." });
+  if (stage.status !== "open") return res.status(400).json({ error: "Só podes editar uma etapa ainda aberta." });
+  const closesAt = req.body.safetyClosesAt ? new Date(req.body.safetyClosesAt) : null;
+  if (!closesAt || Number.isNaN(closesAt.getTime())) return res.status(400).json({ error: "Data ou hora inválida." });
+  db.prepare("UPDATE stages SET title=?,safety_closes_at=?,distance_threshold=? WHERE id=?")
+    .run(String(req.body.title || ""), closesAt.toISOString(), Number(req.body.distanceThreshold || 50), stage.id);
+  res.json({ ok: true });
 });
 
 app.post("/api/admin/stages/:id/close", requireAdmin, (req, res) => {
