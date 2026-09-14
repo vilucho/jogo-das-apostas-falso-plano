@@ -153,27 +153,42 @@ app.put("/api/stages/:id/bet", requireUser, (req, res) => {
 });
 
 app.post("/api/admin/competitions", requireAdmin, (req, res) => {
-  const name = String(req.body.name || "").trim();
-  const year = Number(req.body.year);
-  const firstCloseAt = req.body.firstCloseAt ? new Date(req.body.firstCloseAt) : null;
-  if (!name || !Number.isInteger(year) || !firstCloseAt || Number.isNaN(firstCloseAt.getTime())) return res.status(400).json({ error: "Indica o nome, o ano e a data da primeira etapa." });
-  let info;
-  db.transaction(() => {
-    info = db.prepare("INSERT INTO competitions(name,year) VALUES(?,?)").run(name, year);
-    const insert = db.prepare("INSERT INTO stages(competition_id,number,safety_closes_at,distance_threshold) VALUES(?,?,?,50)");
-    for (let number = 1; number <= 21; number++) {
-      insert.run(info.lastInsertRowid, number, new Date(firstCloseAt.getTime() + (number - 1) * 864e5).toISOString());
+  try {
+    const name = String(req.body.name || "").trim();
+    const year = Number(req.body.year);
+    const stageCount = Number(req.body.stageCount);
+    const firstCloseAt = req.body.firstCloseAt ? new Date(req.body.firstCloseAt) : null;
+    const riders = parseCsv(req.body.csv);
+    if (!name || !Number.isInteger(year) || !firstCloseAt || Number.isNaN(firstCloseAt.getTime())) throw new Error("Indica o nome, o ano e a data da primeira etapa.");
+    if (!Number.isInteger(stageCount) || stageCount < 1 || stageCount > 21) throw new Error("O número de etapas deve ficar entre 1 e 21.");
+    const seen = new Set();
+    for (const rider of riders) {
+      const key = normalizeName(rider.name);
+      if (seen.has(key)) throw new Error(`Ciclista repetido: ${rider.name}`);
+      seen.add(key);
     }
-  })();
-  res.json({ id: info.lastInsertRowid });
+    let info;
+    db.transaction(() => {
+      info = db.prepare("INSERT INTO competitions(name,year) VALUES(?,?)").run(name, year);
+      const insertStage = db.prepare("INSERT INTO stages(competition_id,number,safety_closes_at,distance_threshold) VALUES(?,?,?,50)");
+      for (let number = 1; number <= stageCount; number++) {
+        insertStage.run(info.lastInsertRowid, number, new Date(firstCloseAt.getTime() + (number - 1) * 864e5).toISOString());
+      }
+      const insertRider = db.prepare("INSERT INTO riders(competition_id,name,team,normalized_name) VALUES(?,?,?,?)");
+      riders.forEach(rider => insertRider.run(info.lastInsertRowid, rider.name, rider.team, normalizeName(rider.name)));
+    })();
+    res.json({ id: info.lastInsertRowid, stages: stageCount, riders: riders.length });
+  } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.post("/api/admin/competitions/:id/generate-stages", requireAdmin, (req, res) => {
   const firstCloseAt = req.body.firstCloseAt ? new Date(req.body.firstCloseAt) : null;
+  const stageCount = Number(req.body.stageCount);
   if (!firstCloseAt || Number.isNaN(firstCloseAt.getTime())) return res.status(400).json({ error: "Indica a data da primeira etapa." });
+  if (!Number.isInteger(stageCount) || stageCount < 1 || stageCount > 21) return res.status(400).json({ error: "O número de etapas deve ficar entre 1 e 21." });
   const insert = db.prepare("INSERT OR IGNORE INTO stages(competition_id,number,safety_closes_at,distance_threshold) VALUES(?,?,?,50)");
   db.transaction(() => {
-    for (let number = 1; number <= 21; number++) {
+    for (let number = 1; number <= stageCount; number++) {
       insert.run(req.params.id, number, new Date(firstCloseAt.getTime() + (number - 1) * 864e5).toISOString());
     }
   })();
